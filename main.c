@@ -23,13 +23,14 @@
 #include <png.h>
 
 #define FBIO_EINK_UPDATE_DISPLAY_AREA 0x46dd
-#define MAX_RAIN_FALLS_PER_LAYER    200
+#define MAX_RAIN_FALLS_PER_LAYER    120
 #define NUM_LAYERS 4
 #define NUM_ACTIVE_LAYERS 4
 #define MAX_U8  255
 #define SPRITE_WIDTH1 20
 #define SPRITE_HEIGHT1 25
 #define FOLDER "/mnt/us/tcc/"
+//#define DITHER
 
 enum GMLIB_op { GMLIB_INIT,GMLIB_CLOSE,GMLIB_UPDATE };
 typedef unsigned char u8;
@@ -81,6 +82,7 @@ void cleanup(void* spriteSheetRows, void* spriteSheet, void* rowPointers, void* 
 void cleanupPngPointers(void* rowPointers, void* pngImageData,
              png_structp pngPtr, png_infop infoPtr, FILE* pngFile);
 void fillByMemCpy(int x,int y,int w, int h, const u8 *rowPointer, u8* wb);
+void copyWorkBufferToFramebuffer(void);
 
 // Geekmaster's functions
 void circle(int,int,int,u8*);
@@ -133,28 +135,28 @@ void hoser(void) {
 
     layers[0].fallWidth = 5;
     layers[0].charHeight = 6;
-    layers[0].maxFalls = 200;
+    layers[0].maxFalls = MX/layers[0].fallWidth;
     layers[0].minDrops = 30;
     layers[0].frequency = 1*layers[0].maxFalls;
     layers[0].active = 1;
 
     layers[1].fallWidth = 12;
     layers[1].charHeight = 15;
-    layers[1].maxFalls = 200;
+    layers[1].maxFalls = MX/layers[1].fallWidth;
     layers[1].minDrops = 5;
     layers[1].frequency = 1*layers[1].maxFalls;
     layers[1].active = 1;
 
     layers[2].fallWidth = 16;
     layers[2].charHeight = 20;
-    layers[2].maxFalls = 200;
+    layers[2].maxFalls = MX/layers[2].fallWidth;
     layers[2].minDrops = 10;
     layers[2].frequency = 5*layers[2].maxFalls;
     layers[2].active = 1;
 
     layers[3].fallWidth = 20;
     layers[3].charHeight = 25;
-    layers[3].maxFalls = 200;
+    layers[3].maxFalls = MX/layers[3].fallWidth;
     layers[3].minDrops = 1;
     layers[3].frequency = 5*layers[3].maxFalls;
     layers[3].active = 1;
@@ -183,7 +185,8 @@ void hoser(void) {
         //printf("start iteration %i\n",i);
         for (l=0; l<NUM_ACTIVE_LAYERS; l++)
         {
-            if (layers[l].active)
+            // give each layer 10 frames before starting the next
+            if (layers[l].active && i > l*10)
             {
                 //printf("draw layer %i\n",l);
                 drawLayer(&layers[l]);
@@ -254,7 +257,13 @@ int gmlib(int op) {
         close(fdFB);     // close fb0
         closeWorkbuffers();
     } else if (GMLIB_UPDATE==op) {
-        if (ppb/2) { d4w();
+        if (ppb/2) {
+#ifdef DITHER
+            d4w();
+#else
+            copyWorkBufferToFramebuffer();
+            usleep(500000);
+#endif // DITHER
         	ua.x1=0; ua.y1=0; ua.x2=MX; ua.y2=MY; ua.fx=0; ua.buffer=NULL;
             ioctl(fdFB, FBIO_EINK_UPDATE_DISPLAY_AREA, &ua); // fx_update_partial
         }
@@ -339,7 +348,11 @@ void collapseLayers(rainLayer *layers)
                 i2 = *pi2++;
                 i3 = *pi3++;
                 ifinal = i0 + i1 + i2 + i3;
+#ifdef DITHER
                 *po++ = ifinal > MAX_U8 ? MAX_U8 : (u8)ifinal;
+#else
+                *po++ = ifinal > MAX_U8 ? 0 : MAX_U8 - (u8)ifinal;
+#endif // DITHER
             }
         }
     //}
@@ -545,6 +558,25 @@ void d4w(void) {
     }
 }
 
+//===========================
+// copyWorkBufferToFramebuffer - copy, only taking higher order bits
+//---------------------------
+void copyWorkBufferToFramebuffer(void) {
+    u8 *pi,*po, tmp; int x,y;
+    pi=mwb; po=fb0;
+    for (y=0;y<MY;y++)
+    {
+        for (x=0;x<MX;x+=1)
+        {
+            //printf("%X, %X", *pi, *(pi+1));
+            tmp = (*pi++ & 0xF0) | (*pi++ >> 4);
+            //printf(", %X\n", tmp);
+            *po++ = tmp;
+
+        }
+    }
+}
+
 //==============================================
 // circle - optimized midpoint circle algorithm
 //----------------------------------------------
@@ -644,14 +676,14 @@ void drawSpriteGrey(int x,int y,int w, int h, u8 **rowPointers, u8* wb, unsigned
     po += y*MX + x;
     for (i=0; i<b; i++)
     {
+        po = wb + (y+i) * MX + x;
         for(j=0; j<a; j++)
         {
-            temp = rowPointers[rowOffset][j]; - 128;
-            temp -= 128;
+            temp = rowPointers[rowOffset][j];
+            temp -= 0x80;
             *po++ = temp < 0 ? 0 : (u8)temp;
         }
         //memcpy(po, rowPointers[rowOffset+i], a);
-        po = wb + (y+i) * MX + x;
         rowOffset++;
     }
 }
@@ -710,7 +742,7 @@ int loadSpriteSheet(const char* fileName, u8 ***spriteRowPointersOut, u8 **sprit
 
     png_get_IHDR(png_ptr, info_ptr, &width, &height, &bit_depth, &color_type,
       NULL, NULL, NULL);
-    printf("w:%d, h%d, bitdepth:%d, colortype:%d\n", width, height, bit_depth, color_type);
+    //printf("w:%d, h%d, bitdepth:%d, colortype:%d\n", width, height, bit_depth, color_type);
 
     //png_read_update_info(png_ptr, info_ptr);
     bytesPerRow = png_get_rowbytes(png_ptr, info_ptr);
@@ -772,7 +804,7 @@ int loadSpriteSheet(const char* fileName, u8 ***spriteRowPointersOut, u8 **sprit
             //printf("\n");
             //printf("%d:%d \n", j, row_pointers[y+i][j]);
         }
-        printf("\n\n");
+        //printf("\n\n");
     }
     png_read_end(png_ptr, NULL);
     cleanupPngPointers(rowPointers, pngImage_data, png_ptr, info_ptr, pngFile);
